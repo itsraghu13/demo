@@ -1,0 +1,48 @@
+from pyspark.sql import SparkSession
+import math
+
+# Initialize Spark Session
+spark = SparkSession.builder.appName("TeradataParallelRead").getOrCreate()
+
+# JDBC connection properties
+jdbc_url = "jdbc:teradata://<HOST>/DATABASE=<DB_NAME>"
+properties = {
+    "user": "<USER>",
+    "password": "<PASSWORD>",
+    "driver": "com.teradata.jdbc.TeraDriver"
+}
+
+# Table and Partition Configuration
+table_name = "<TABLE_NAME>"
+partition_column = "<COLUMN_NAME>"
+num_partitions = 4  # Adjust based on your requirements
+
+# Fetch min and max values for partitioning
+query = f"(SELECT MIN({partition_column}) AS min_val, MAX({partition_column}) AS max_val FROM {table_name}) AS bounds"
+bounds_df = spark.read.jdbc(url=jdbc_url, table=query, properties=properties)
+min_val, max_val = bounds_df.collect()[0]
+
+# Calculate stride for partitions
+stride = math.ceil((max_val - min_val) / num_partitions)
+
+# Generate WHERE clauses for partitions
+partitions = []
+for i in range(num_partitions):
+    lower_bound = min_val + i * stride
+    upper_bound = min_val + (i + 1) * stride
+    where_clause = f"{partition_column} >= {lower_bound} AND {partition_column} < {upper_bound}"
+    partitions.append(where_clause)
+
+# Read data in parallel using WHERE clauses
+dfs = [
+    spark.read.jdbc(url=jdbc_url, table=table_name, properties=properties, predicates=[where_clause])
+    for where_clause in partitions
+]
+
+# Union all partitions into a single DataFrame
+final_df = dfs[0]
+for df in dfs[1:]:
+    final_df = final_df.union(df)
+
+# Show result
+final_df.show()
