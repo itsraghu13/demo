@@ -46,3 +46,122 @@ for df in dfs[1:]:
 
 # Show result
 final_df.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+from pyspark.sql import SparkSession
+import concurrent.futures
+import pandas as pd
+from pyspark.sql import DataFrame
+
+def custom_parallel_jdbc_load(spark, jdbc_url, table, id_column, properties, num_workers=8):
+    """
+    Custom parallel JDBC loader that forces parallelization through multiple queries.
+    
+    Args:
+        spark: SparkSession object
+        jdbc_url: JDBC connection URL
+        table: Database table name (fully qualified)
+        id_column: Primary key or indexed column to partition on
+        properties: JDBC connection properties
+        num_workers: Number of parallel workers
+    
+    Returns:
+        Combined Spark DataFrame
+    """
+    # First get the min and max values of the ID column to determine ranges
+    min_max_query = f"(SELECT MIN({id_column}) as min_val, MAX({id_column}) as max_val FROM {table}) as minmax"
+    
+    bounds_df = spark.read.jdbc(
+        url=jdbc_url,
+        table=min_max_query,
+        properties=properties
+    )
+    
+    min_val, max_val = bounds_df.collect()[0]
+    print(f"ID range: {min_val} to {max_val}")
+    
+    # Calculate chunk size for each partition
+    chunk_size = (max_val - min_val) // num_workers + 1
+    
+    # Create partition boundaries
+    boundaries = [(min_val + i * chunk_size, min_val + (i + 1) * chunk_size) 
+                  for i in range(num_workers)]
+    boundaries[-1] = (boundaries[-1][0], max_val + 1)  # Ensure we include the max value
+    
+    # Function to load a single partition
+    def load_partition(bounds):
+        lower, upper = bounds
+        partition_query = f"""
+        (SELECT * FROM {table} 
+         WHERE {id_column} >= {lower} AND {id_column} < {upper}) as partition_query
+        """
+        
+        # Create a new SparkSession for each worker to avoid connection sharing issues
+        worker_spark = SparkSession.builder.getOrCreate()
+        
+        df = worker_spark.read.jdbc(
+            url=jdbc_url,
+            table=partition_query,
+            properties=properties
+        )
+        
+        # Cache to memory to avoid re-execution
+        df.cache()
+        count = df.count()
+        print(f"Loaded partition {lower}-{upper} with {count} rows")
+        
+        return df
+    
+    # Use ThreadPoolExecutor to parallelize loading
+    # This approach will create multiple independent connections
+    partition_dfs = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+        future_to_partition = {executor.submit(load_partition, bounds): bounds for bounds in boundaries}
+        for future in concurrent.futures.as_completed(future_to_partition):
+            partition_dfs.append(future.result())
+    
+    # Union all partitions
+    final_df = partition_dfs[0]
+    for df in partition_dfs[1:]:
+        final_df = final_df.union(df)
+    
+    return final_df
+
+# Example usage
+properties = {
+    "driver": "your.jdbc.driver.ClassName",
+    "user": "username",
+    "password": "password",
+    "fetchsize": "10000"
+}
+
+df = custom_parallel_jdbc_load(
+    spark=spark,
+    jdbc_url=jdbc_url,
+    table="my_database.my_table",
+    id_column="partitionColumn",  # Use your primary key or indexed column
+    properties=properties,
+    num_workers=8  # Adjust based on your cluster
+)
+
+# Optional: force a shuffle to verify partitioning
+df = df.repartition(8)
+print(f"Final DataFrame partition count: {df.rdd.getNumPartitions()}")
