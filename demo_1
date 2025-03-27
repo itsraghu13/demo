@@ -1,3 +1,16 @@
+
+WITH NumberedData AS (
+    SELECT order_id, customer_id, amount,
+           ROW_NUMBER() OVER (ORDER BY order_id) AS rn,
+           COUNT(*) OVER () AS total_rows
+    FROM sales_data
+)
+SELECT order_id, customer_id, amount,
+       CEIL(rn * 10.0 / total_rows) AS partition_id  -- Simulates NTILE(10)
+FROM NumberedData;
+
+
+
 from pyspark.sql import SparkSession
 import math
 
