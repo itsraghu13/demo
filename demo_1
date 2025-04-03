@@ -1,3 +1,40 @@
+html_code = """
+<!DOCTYPE html>
+<html>
+<head>
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({ startOnLoad: true });
+    </script>
+</head>
+<body>
+    <div class="mermaid">
+        flowchart TD
+            A["🚀 Spark Job Initiation (Start Spark Session & Configure Connection)"] 
+               -->|Trigger Read| B["🛠 Partitioning Logic (Define partitionColumn, Lower & Upper Bound, NumPartitions)"]
+
+            B -->|Generate Partitions| C{"📌 Partitioned Query Execution (Each Executor Reads a Partition Independently)"}
+
+            C -->|Query 1| D["🗄 SQL Query Execution SELECT * FROM my_table WHERE partition_column >= 100 AND partition_column < 200"]
+            C -->|Query 2| E["🗄 SQL Query Execution SELECT * FROM my_table WHERE partition_column >= 200 AND partition_column < 300"]
+            C -->|Query N| F["🗄 SQL Query Execution SELECT * FROM my_table WHERE partition_column >= X AND partition_column < Y"]
+
+            D --> G{"⚙️ Process Data in Executors (Fetch Data from Teradata in Parallel)"}
+            E --> G
+            F --> G
+
+            G -->|Transform & Process| H["🔄 Data Transformation (Filtering, Aggregation, Schema Mapping, Casting)"]
+
+            H -->|Write to Delta| I["📥 Load Data into Delta Table (Optimized Write using Append, Overwrite, or Merge)"]
+    </div>
+</body>
+</html>
+"""
+
+# Display the HTML in Databricks
+displayHTML(html_code)
+
+
 
 WITH NumberedData AS (
     SELECT order_id, customer_id, amount,
