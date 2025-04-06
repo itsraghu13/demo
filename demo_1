@@ -1,3 +1,24 @@
+SELECT
+  FLOOR(HASHBUCKET(HASHROW(id_client)) / (HASHBUCKET(HASHROW(MAX(id_client))) / 10)) * (HASHBUCKET(HASHROW(MAX(id_client))) / 10) AS interval_start,
+  FLOOR(HASHBUCKET(HASHROW(id_client)) / (HASHBUCKET(HASHROW(MAX(id_client))) / 10)) * (HASHBUCKET(HASHROW(MAX(id_client))) / 10) + (HASHBUCKET(HASHROW(MAX(id_client))) / 10) - 1 AS interval_end,
+  COUNT(*) AS row_count
+FROM schema.client
+WHERE dt_to >= DATE '2023-08-01'
+  AND dt_from <= DATE '2023-08-31'
+GROUP BY 1, 2
+ORDER BY 1;
+
+
+
+
+
+
+
+
+
+
+
+
 WITH hash_values AS (
     SELECT 
         HASHROW(CAST(id_client AS VARCHAR(100))) AS hash_value
