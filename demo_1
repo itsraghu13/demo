@@ -1,3 +1,44 @@
+-- Set number of buckets (you can parameterize this in scripts)
+-- This divides 2^32 into equal parts like you did in PostgreSQL
+
+SELECT 
+  FLOOR(ABS(HASHAMP(HASHBUCKET(HASHROW(id_client)))) / (4294967296 / 10)) * (4294967296 / 10) AS interval_start,
+  FLOOR(ABS(HASHAMP(HASHBUCKET(HASHROW(id_client)))) / (4294967296 / 10)) * (4294967296 / 10) + (4294967296 / 10) - 1 AS interval_end,
+  COUNT(*) AS row_count
+FROM schema.client
+WHERE dt_to >= DATE '2023-08-01'
+  AND dt_from <= DATE '2023-08-31'
+GROUP BY 1, 2
+ORDER BY 1;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 html_code = """
 <!DOCTYPE html>
 <html>
