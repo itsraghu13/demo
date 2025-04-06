@@ -1,3 +1,32 @@
+
+WITH bucketed_clients AS (
+    SELECT 
+        FLOOR(ABS(CAST(HASHROW(CAST(id_client AS VARCHAR(100))) AS INTEGER)) / 429496724.0) AS bucket
+    FROM
+        schema.client
+    WHERE
+        DATE '2023-08-01' <= dt_to 
+        AND DATE '2023-08-31' >= dt_from
+)
+SELECT 
+    bucket * 429496724 AS interval_start,
+    bucket * 429496724 + 429496724 - 1 AS interval_end,
+    COUNT(*)
+FROM
+    bucketed_clients
+GROUP BY
+    bucket
+ORDER BY
+    bucket
+
+
+
+
+
+
+
+
+
 SELECT
     bucket * 429496724 AS interval_start,
     bucket * 429496724 + 429496724 - 1 AS interval_end,
