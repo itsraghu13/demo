@@ -1,3 +1,41 @@
+WITH hash_values AS (
+    SELECT 
+        HASHROW(CAST(id_client AS VARCHAR(100))) AS hash_value
+    FROM
+        schema.client
+    WHERE
+        DATE '2023-08-01' <= dt_to 
+        AND DATE '2023-08-31' >= dt_from
+),
+bucketed_clients AS (
+    SELECT 
+        FLOOR((
+            (CAST(SUBSTRING(hash_value FROM 1 FOR 1) AS BYTEINT) & 255) * 16777216.0 +
+            (CAST(SUBSTRING(hash_value FROM 2 FOR 1) AS BYTEINT) & 255) * 65536.0 +
+            (CAST(SUBSTRING(hash_value FROM 3 FOR 1) AS BYTEINT) & 255) * 256.0 +
+            (CAST(SUBSTRING(hash_value FROM 4 FOR 1) AS BYTEINT) & 255)
+        ) / 429496724.0) AS bucket
+    FROM
+        hash_values
+)
+SELECT 
+    bucket * 429496724 AS interval_start,
+    bucket * 429496724 + 429496724 - 1 AS interval_end,
+    COUNT(*) AS client_count
+FROM
+    bucketed_clients
+GROUP BY
+    bucket
+ORDER BY
+    bucket;
+
+
+
+
+
+
+
+
 
 WITH bucketed_clients AS (
     SELECT 
