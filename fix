@@ -1,10 +1,6 @@
-if ("INT" in column_type or 
-    "INTEGER" in column_type or 
-    "BYTEINT" in column_type or
-    "SMALLINT" in column_type or
-    "BIGINT" in column_type or
-    "NUMERIC" in column_type or 
-    "DECIMAL" in column_type or 
-    "FLOAT" in column_type or
-    "REAL" in column_type or
-    "DOUBLE" in column_type):
+if (column_type.startswith("I") or     # INTEGER-like types: I, I1, I2
+    column_type == "F" or              # FLOAT
+    column_type == "D" or              # DECIMAL
+    column_type == "N" or              # NUMERIC
+    column_type == "BF" or             # BYTE FLOAT (if exists)
+    column_type == "RD"):              # REAL DOUBLE (if applicable)
