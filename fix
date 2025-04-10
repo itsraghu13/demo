@@ -1,0 +1,10 @@
+if ("INT" in column_type or 
+    "INTEGER" in column_type or 
+    "BYTEINT" in column_type or
+    "SMALLINT" in column_type or
+    "BIGINT" in column_type or
+    "NUMERIC" in column_type or 
+    "DECIMAL" in column_type or 
+    "FLOAT" in column_type or
+    "REAL" in column_type or
+    "DOUBLE" in column_type):
