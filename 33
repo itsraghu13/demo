@@ -1,0 +1,161 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, expr
+
+def get_best_partition_column(
+    spark,
+    jdbc_url,
+    jdbc_props,
+    database_name,
+    table_name,
+    min_distinct_threshold=10,
+    preferred_types=["I", "I8", "DA", "TS"]  # INT, BIGINT, DATE, TIMESTAMP
+):
+    """
+    Returns the best partitioning column from Teradata statistics.
+    """
+    # Query using the actual column names from dbc.statsV
+    query = f"""
+        (SELECT 
+            DatabaseName,
+            TableName,
+            ColumnName,
+            UniqueValueCount,
+            HighModeFreq,
+            LastCollectTimeStamp,
+            RowCount
+         FROM dbc.statsV
+         WHERE DatabaseName = '{database_name}' 
+         AND TableName = '{table_name}'
+         AND ValidStats = 'Y') as stats
+    """
+    
+    try:
+        # Fetch statistics data
+        stats_df = spark.read.jdbc(url=jdbc_url, table=query, properties=jdbc_props)
+        
+        if stats_df.count() == 0:
+            print(f"No valid statistics found for {database_name}.{table_name}")
+            return None
+        
+        # Get column data types from another Teradata system table
+        column_types_query = f"""
+        (SELECT
+            ColumnName,
+            ColumnType
+         FROM dbc.ColumnsV
+         WHERE DatabaseName = '{database_name}'
+         AND TableName = '{table_name}') as cols
+        """
+        
+        column_types_df = spark.read.jdbc(url=jdbc_url, table=column_types_query, properties=jdbc_props)
+        
+        # Join stats with column types
+        stats_with_types = stats_df.join(
+            column_types_df,
+            on="ColumnName",
+            how="inner"
+        )
+        
+        # Split multi-column and single-column stats
+        single_col_stats = stats_with_types.filter(~col("ColumnName").contains(","))
+        multi_col_stats = stats_with_types.filter(col("ColumnName").contains(","))
+        
+        # Filter single column candidates
+        candidate_columns = single_col_stats.filter(
+            (col("UniqueValueCount").isNotNull()) &
+            (col("UniqueValueCount") > min_distinct_threshold) &
+            (col("ColumnType").isin(preferred_types))
+        )
+        
+        # Calculate skew ratio (lower is better for partitioning)
+        candidate_columns = candidate_columns.withColumn(
+            "skew_ratio", 
+            col("HighModeFreq") / col("UniqueValueCount")
+        )
+        
+        # Extract min and max values for good candidates
+        top_candidates = candidate_columns.orderBy(
+            col("skew_ratio").asc(),
+            col("UniqueValueCount").desc()
+        ).limit(5)
+        
+        # If we have multi-column stats, use them to enhance our column selection
+        if multi_col_stats.count() > 0:
+            # Cache for multiple accesses
+            candidates_cached = candidate_columns.cache()
+            
+            for row in multi_col_stats.collect():
+                col_combo = row["ColumnName"].split(",")
+                combo_ndv = row["UniqueValueCount"]
+                
+                for single_col in col_combo:
+                    single_col = single_col.strip()
+                    match = candidates_cached.filter(col("ColumnName") == single_col).first()
+                    if match:
+                        single_ndv = match["UniqueValueCount"]
+                        # If single col NDV is close to combo NDV, it's likely a good key column
+                        if single_ndv / combo_ndv > 0.8:
+                            # This is a strong candidate, but we're already tracking it
+                            pass
+            
+            candidates_cached.unpersist()
+        
+        # Get the best candidate and fetch min/max values
+        best = top_candidates.first()
+        
+        if not best:
+            print("No suitable partition column found")
+            return None
+        
+        # Get min/max values for the best column
+        bounds_query = f"""
+        (SELECT
+            ColumnName,
+            CAST(MIN({best["ColumnName"]}) AS VARCHAR(100)) AS MinValue,
+            CAST(MAX({best["ColumnName"]}) AS VARCHAR(100)) AS MaxValue
+         FROM {database_name}.{table_name}
+         GROUP BY ColumnName) as bounds
+        """
+        
+        try:
+            bounds_df = spark.read.jdbc(url=jdbc_url, table=bounds_query, properties=jdbc_props)
+            bounds_row = bounds_df.first()
+            
+            if bounds_row:
+                try:
+                    min_val = int(float(bounds_row["MinValue"]))
+                    max_val = int(float(bounds_row["MaxValue"]))
+                    return (best["ColumnName"], min_val, max_val)
+                except:
+                    # If we can't convert to int, return the column name only
+                    return (best["ColumnName"], None, None)
+            else:
+                return (best["ColumnName"], None, None)
+                
+        except Exception as e:
+            print(f"Error fetching min/max values: {e}")
+            # Return column name even if we couldn't get min/max
+            return (best["ColumnName"], None, None)
+            
+    except Exception as e:
+        print(f"Failed to fetch or process stats: {e}")
+        return None
+
+
+
+
+# Call the function
+best_partition_column = get_best_partition_column(
+    spark=spark,
+    jdbc_url=jdbc_url,
+    jdbc_props=jdbc_props,
+    database_name=database_name,
+    table_name=table_name,
+    min_distinct_threshold=20,  # Optional: minimum number of distinct values
+    preferred_types=["I", "I8", "DA", "TS"]  # Optional: preferred column types
+)
+
+# Handle the result
+if best_partition_column:
+    column_name, min_val, max_val = best_partition_column
+    print(f"Best partition column: {column_name}")
