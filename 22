@@ -1,0 +1,97 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col
+from typing import List, Tuple, Optional
+
+
+def get_best_partition_column_with_multicol_support(
+    spark: SparkSession,
+    jdbc_url: str,
+    jdbc_props: dict,
+    database_name: str,
+    table_name: str,
+    top_n: int = 3,
+    min_distinct_threshold: int = 10,
+    preferred_types: List[str] = ["I", "I8", "DA", "TS"]  # INT, BIGINT, DATE, TIMESTAMP
+) -> Optional[Tuple[str, int, int]]:
+    """
+    Returns the best partitioning column (with lower and upper bounds) from Teradata statsv.
+    Handles multi-column stats by selecting best individual column.
+    """
+
+    query = f"""
+        (SELECT ColumnName, MaxValue, MinValue, ModeFrequency, 
+                NumOfDistinctValues, ColumnType
+         FROM dbc.statsv
+         WHERE TableName = '{table_name}' AND DatabaseName = '{database_name}') as stats
+    """
+
+    try:
+        stats_df = spark.read.jdbc(url=jdbc_url, table=query, properties=jdbc_props)
+
+        # Step 1: Separate multi-column and single-column stats
+        multi_col_stats = stats_df.filter(col("ColumnName").contains(","))
+        single_col_stats = stats_df.filter(~col("ColumnName").contains(","))
+
+        # Step 2: Process single-column candidates
+        filtered_single = single_col_stats.filter(
+            (col("NumOfDistinctValues").isNotNull()) &
+            (col("NumOfDistinctValues") > min_distinct_threshold) &
+            (col("MinValue").isNotNull()) &
+            (col("MaxValue").isNotNull()) &
+            (col("ColumnType").isin(preferred_types))
+        ).withColumn("skew_ratio", col("ModeFrequency") / col("NumOfDistinctValues"))
+
+        # Step 3: Add individual columns from multi-column stats (if better)
+        for row in multi_col_stats.collect():
+            col_combo = row["ColumnName"].split(",")
+            ndv_combo = row["NumOfDistinctValues"]
+
+            for single_col in col_combo:
+                match = filtered_single.filter(col("ColumnName") == single_col).first()
+                if match:
+                    # If single col NDV is close to combo NDV, it's a good candidate
+                    ratio = match["NumOfDistinctValues"] / ndv_combo
+                    if ratio > 0.7:
+                        # Already considered, no action
+                        continue
+                else:
+                    print(f"[INFO] Column from multi-col stat not found in single stats: {single_col}")
+
+        # Step 4: Rank and return best candidate
+        best = filtered_single.orderBy(col("skew_ratio").asc(), col("NumOfDistinctValues").desc()).first()
+
+        if best:
+            return (
+                best["ColumnName"],
+                int(best["MinValue"]),
+                int(best["MaxValue"])
+            )
+        else:
+            print("No valid single column found for partitioning.")
+            return None
+
+    except Exception as e:
+        print(f"[ERROR] Failed to fetch or process stats: {e}")
+        return None
+
+
+
+
+partition_info = get_best_partition_column_with_multicol_support(
+    spark,
+    jdbc_url="jdbc:teradata://<host>/DATABASE=dbc",
+    jdbc_props={
+        "user": "your_user",
+        "password": "your_pass",
+        "driver": "com.teradata.jdbc.TeraDriver"
+    },
+    database_name="your_db",
+    table_name="your_table"
+)
+
+if partition_info:
+    col_name, lower, upper = partition_info
+    print(f"Partitioning by: {col_name} | Range: [{lower}, {upper}]")
+    # Use it in JDBC read...
+else:
+    print("No suitable partition column found.")
