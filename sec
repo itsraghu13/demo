@@ -1,3 +1,63 @@
+import base64
+from Cryptodome.Cipher import AES
+from Cryptodome.Protocol.KDF import PBKDF2
+import os, sys
+from loguru import logger
+
+# Redact function for sensitive outputs
+def redact_sensitive(data):
+    return "***redacted***"
+
+try:
+    key = "key1"
+    iv = "my_username_pass"
+    salt = "salt"
+
+    if not (key and iv and salt):
+        raise Exception("Error while fetching details for key/iv/salt")
+except Exception as e:
+    logger.error("Error occurred. Details: {}", redact_sensitive(str(e)))
+    sys.exit(0)
+
+BS = 16
+pad = lambda s: bytes(s + (BS - len(s) % BS) * chr(BS - len(s) % BS), 'utf-8')
+unpad = lambda s: s[0:-ord(s[-1:])]
+
+def get_private_key():
+    Salt = salt.encode('utf-8')
+    kdf = PBKDF2(key, Salt, 64, 1000)
+    key32 = kdf[:32]
+    return key32
+
+def encrypt(raw):
+    raw = pad(raw)
+    cipher = AES.new(get_private_key(), AES.MODE_CBC, iv.encode('utf-8'))
+    encrypted = base64.b64encode(cipher.encrypt(raw)).decode()
+    logger.info("Encrypted value: {}", redact_sensitive(encrypted))
+    print("Encrypted value:", redact_sensitive(encrypted))  # Redacted in print
+    return encrypted
+
+def decrypt(enc):
+    try:
+        cipher = AES.new(get_private_key(), AES.MODE_CBC, iv.encode('utf-8'))
+        decrypted = unpad(cipher.decrypt(base64.b64decode(enc))).decode('utf8')
+        logger.info("Decrypted value: {}", redact_sensitive(decrypted))
+        print("Decrypted value:", redact_sensitive(decrypted))  # Redacted in print
+        return decrypted
+    except Exception as e:
+        logger.warning("Decryption failed. Returning 'redact'. Details: {}", redact_sensitive(str(e)))
+        print("Decrypted value:", "redact")
+        return "redact"
+
+# === Example Usage ===
+actual_encrypted = encrypt("manish")
+actual_decrypted = decrypt(actual_encrypted)
+
+# Test invalid decryption
+_ = decrypt("U1AMRIQSTYosVJCmmqUHnA==")
+
+
+
 from cryptography.fernet import Fernet
 
 # Generate a key (do this once, save securely)
