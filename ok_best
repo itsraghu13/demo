@@ -1,0 +1,149 @@
+mport time
+from typing import List, Dict, Optional
+from pyspark.sql import SparkSession, Row
+import teradatasql
+
+class PartitionBenchmark:
+    def _init_(self, spark: SparkSession, jdbc_url: str, jdbc_props: Dict[str, str]):
+        self.spark = spark
+        self.jdbc_url = jdbc_url
+        self.jdbc_props = jdbc_props
+
+    def get_candidates_from_statsv(
+        self,
+        teradata_host: str,
+        user: str,
+        password: str,
+        db_name: str,
+        table_name: str,
+        top_n: int = 3
+    ) -> List[Tuple[str, int, int, int]]:
+        query = f"""
+        SELECT
+            ColumnName,
+            MIN(StatValue) AS MinValue,
+            MAX(StatValue) AS MaxValue,
+            MAX(NumDistinctValues) AS NDV
+        FROM dbc.StatsV
+        WHERE DatabaseName = '{db_name}'
+            AND TableName = '{table_name}'
+            AND StatType = 'H'
+        GROUP BY ColumnName
+        QUALIFY RANK() OVER (ORDER BY MAX(NumDistinctValues) DESC) <= {top_n}
+        """
+
+        with teradatasql.connect(host=teradata_host, user=user, password=password) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                rows = cur.fetchall()
+
+        return [(row[0], int(row[1]), int(row[2]), int(row[3])) for row in rows]
+
+    def benchmark_partition_reads(
+        self,
+        db_name: str,
+        table_name: str,
+        candidates: List[Tuple[str, int, int, int]],
+        num_partitions: int = 8
+    ) -> List[dict]:
+        results = []
+
+        for col_name, min_val, max_val, ndv in candidates:
+            print(f"\nTesting: {col_name} | Range: [{min_val}, {max_val}]")
+
+            start = time.time()
+            try:
+                df = self.spark.read \
+                    .format("jdbc") \
+                    .option("url", self.jdbc_url) \
+                    .option("dbtable", f"{db_name}.{table_name}") \
+                    .option("user", self.jdbc_props["user"]) \
+                    .option("password", self.jdbc_props["password"]) \
+                    .option("partitionColumn", col_name) \
+                    .option("lowerBound", min_val) \
+                    .option("upperBound", max_val) \
+                    .option("numPartitions", str(num_partitions)) \
+                    .option("driver", self.jdbc_props["driver"]) \
+                    .load()
+
+                count = df.count()
+                elapsed = round(time.time() - start, 2)
+
+                print(f" -> Success | Count: {count} | Time: {elapsed}s")
+
+                results.append({
+                    "column": col_name,
+                    "count": count,
+                    "time_sec": elapsed,
+                    "ndv": ndv
+                })
+
+            except Exception as e:
+                print(f" -> Failed: {e}")
+                results.append({
+                    "column": col_name,
+                    "error": str(e)
+                })
+
+        return results
+
+    def auto_recommend_partition_column(
+        self,
+        results: List[dict],
+        weight_time: float = 1.0,
+        weight_ndv: float = 0.0001
+    ) -> Optional[dict]:
+        valid = [r for r in results if "error" not in r and r["count"]]
+
+        for r in valid:
+            r["score"] = (r["time_sec"] * weight_time) - (r["ndv"] * weight_ndv)
+
+        if not valid:
+            print("No successful partition read candidates.")
+            return None
+
+        best = sorted(valid, key=lambda x: x["score"])[0]
+
+        print("\n=== Best Partition Column Recommendation ===")
+        print(f"Column     : {best['column']}")
+        print(f"Read Time  : {best['time_sec']}s")
+        print(f"NDV        : {best['ndv']}")
+        print(f"Score      : {round(best['score'], 2)}")
+        print("===========================================")
+
+        return best
+
+
+
+# Spark session
+spark = SparkSession.builder.appName("AutoPartitionBenchmark").getOrCreate()
+
+# JDBC config
+jdbc_url = "jdbc:teradata://<host>/DATABASE=<db_name>"
+jdbc_props = {
+    "user": "your_user",
+    "password": "your_password",
+    "driver": "com.teradata.jdbc.TeraDriver"
+}
+
+# Create benchmarker
+benchmarker = PartitionBenchmark(spark, jdbc_url, jdbc_props)
+
+# Step 1: Get candidates from Teradata statsv
+candidates = benchmarker.get_candidates_from_statsv(
+    teradata_host="<host>",
+    user="your_user",
+    password="your_password",
+    db_name="your_db",
+    table_name="your_table"
+)
+
+# Step 2: Benchmark them
+results = benchmarker.benchmark_partition_reads(
+    db_name="your_db",
+    table_name="your_table",
+    candidates=candidates
+)
+
+# Step 3: Auto-recommend the best one
+best = benchmarker.auto_recommend_partition_column(results)
