@@ -1,3 +1,38 @@
+from cryptography.fernet import Fernet
+
+# Generate a key (do this once, save securely)
+# key = Fernet.generate_key()
+
+# Use stored key
+key = b'REPLACE_THIS_WITH_YOUR_GENERATED_KEY'  # keep this safe
+cipher_suite = Fernet(key)
+
+def encrypt(text: str) -> str:
+    return cipher_suite.encrypt(text.encode()).decode()
+
+def decrypt(token: str) -> str:
+    return cipher_suite.decrypt(token.encode()).decode()
+
+# Example usage:
+# print(encrypt("manish"))
+# print(decrypt(encrypted_string))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import base64
 from Cryptodome.Cipher import AES
 from Cryptodome.Protocol.KDF import PBKDF2
