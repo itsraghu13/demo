@@ -1,0 +1,20 @@
+SELECT 
+    cv.ColumnName,
+    cv.ColumnType,
+    s.UniqueValueCount,
+    s.RowCount,
+    s.AvgRowSize,
+    s.StatsName,
+    s.CreateTimeStamp
+FROM dbc.ColumnV cv
+JOIN dbc.StatsV s
+  ON cv.DatabaseName = s.DatabaseName 
+ AND cv.TableName = s.TableName 
+ AND cv.ColumnName = s.ColumnName
+WHERE cv.DatabaseName = 'YourDatabase'
+  AND cv.TableName = 'YourTable'
+  -- Filter for numeric or date columns; adjust the condition as necessary for your schema
+  AND (cv.ColumnType LIKE '%INT%' OR cv.ColumnType LIKE '%DECIMAL%' OR cv.ColumnType LIKE '%DATE%')
+  -- Consider only columns that have a high number of unique values
+  AND s.UniqueValueCount > 1000
+ORDER BY s.UniqueValueCount DESC;
