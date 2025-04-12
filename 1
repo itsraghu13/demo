@@ -1,0 +1,340 @@
+from pyspark.sql import SparkSession
+import argparse
+import sys
+
+def create_spark_session(app_name="TeradataPartitionOptimizer"):
+    """Create and return a Spark session"""
+    return SparkSession.builder \
+        .appName(app_name) \
+        .config("spark.jars", "/path/to/terajdbc4.jar") \
+        .getOrCreate()
+
+def get_jdbc_connection_properties(username, password):
+    """Create connection properties for JDBC"""
+    return {
+        "user": username,
+        "password": password,
+        "driver": "com.teradata.jdbc.TeraDriver"
+    }
+
+def get_column_stats(spark, host, database, table, username, password):
+    """Get column statistics from DBC.StatsV using Spark JDBC"""
+    jdbc_url = f"jdbc:teradata://{host}/DATABASE=DBC"
+    properties = get_jdbc_connection_properties(username, password)
+    
+    query = f"""
+    SELECT 
+        ColumnName, 
+        UniqueValueCount, 
+        RowCount,
+        NullCount
+    FROM DBC.StatsV
+    WHERE DatabaseName = '{database}' AND TableName = '{table}'
+    """
+    
+    try:
+        stats_df = spark.read.jdbc(
+            url=jdbc_url,
+            table=f"({query}) as stats_query",
+            properties=properties
+        )
+        return stats_df.collect()
+    except Exception as e:
+        print(f"Error fetching stats: {e}")
+        return []
+
+def get_column_info(spark, host, database, table, username, password):
+    """Get column information from DBC.ColumnsV using Spark JDBC"""
+    jdbc_url = f"jdbc:teradata://{host}/DATABASE=DBC"
+    properties = get_jdbc_connection_properties(username, password)
+    
+    query = f"""
+    SELECT 
+        ColumnName, 
+        ColumnType, 
+        ColumnLength
+    FROM DBC.ColumnsV
+    WHERE DatabaseName = '{database}' AND TableName = '{table}'
+    """
+    
+    try:
+        columns_df = spark.read.jdbc(
+            url=jdbc_url,
+            table=f"({query}) as columns_query",
+            properties=properties
+        )
+        return columns_df.collect()
+    except Exception as e:
+        print(f"Error fetching column info: {e}")
+        return []
+
+def get_table_row_count(spark, host, database, table, username, password):
+    """Get the row count for the table using Spark JDBC"""
+    jdbc_url = f"jdbc:teradata://{host}/DATABASE={database}"
+    properties = get_jdbc_connection_properties(username, password)
+    
+    try:
+        # First try to get count directly from the table
+        count_df = spark.read.jdbc(
+            url=jdbc_url,
+            table=f"(SELECT COUNT(*) as row_count FROM {database}.{table}) as count_query",
+            properties=properties
+        )
+        row_count = count_df.first()["row_count"]
+        return row_count
+    except Exception as e:
+        print(f"Error fetching row count directly: {e}")
+        # Try to get from StatsV if direct query fails
+        try:
+            jdbc_url = f"jdbc:teradata://{host}/DATABASE=DBC"
+            query = f"""
+            SELECT MAX(RowCount) as row_count 
+            FROM DBC.StatsV 
+            WHERE DatabaseName = '{database}' AND TableName = '{table}'
+            """
+            
+            count_df = spark.read.jdbc(
+                url=jdbc_url,
+                table=f"({query}) as statsv_count",
+                properties=properties
+            )
+            row_count = count_df.first()["row_count"]
+            return row_count if row_count else 0
+        except Exception as e:
+            print(f"Error fetching row count from StatsV: {e}")
+            return 0
+
+def is_good_partition_type(col_type):
+    """Check if column type is suitable for partitioning based on Teradata type codes"""
+    # Teradata type codes
+    # I = Integer, I1 = BYTEINT, I2 = SMALLINT, I8 = BIGINT
+    # D = DECIMAL, F = FLOAT, DA = DATE, TS = TIMESTAMP
+    # CF = CHARACTER, CV = VARCHAR
+    
+    numeric_types = ['I', 'I1', 'I2', 'I8', 'D', 'F']
+    date_types = ['DA', 'TS']
+    char_types = ['CF', 'CV']
+    
+    if any(col_type.startswith(t) for t in numeric_types):
+        return 3  # Highest priority for numeric types
+    elif any(col_type.startswith(t) for t in date_types):
+        return 2  # High priority for date types
+    elif any(col_type.startswith(t) for t in char_types):
+        return 1  # Lower priority for character types
+    else:
+        return 0  # Not suitable
+
+def calculate_optimal_partitioning(stats, columns, row_count):
+    """Calculate optimal partitioning column and partition count"""
+    if not stats or not columns or row_count == 0:
+        return None, 4  # Default partition count if no data
+    
+    # Convert to dictionaries for easier lookup
+    stats_dict = {row["ColumnName"]: (row["UniqueValueCount"], row["RowCount"], row["NullCount"]) 
+                 for row in stats}  # ColumnName: (UniqueValueCount, RowCount, NullCount)
+    
+    columns_dict = {row["ColumnName"]: (row["ColumnType"], row["ColumnLength"]) 
+                   for row in columns}  # ColumnName: (ColumnType, ColumnLength)
+    
+    best_column = None
+    best_score = -1
+    
+    # Evaluate each column for partitioning suitability
+    for column_name in stats_dict:
+        if column_name not in columns_dict:
+            continue
+            
+        unique_count, col_row_count, null_count = stats_dict[column_name]
+        col_type, col_length = columns_dict[column_name]
+        
+        # Skip columns with no stats or all nulls
+        if unique_count is None or null_count == row_count:
+            continue
+        
+        # Check if data type is suitable for partitioning    
+        type_score = is_good_partition_type(col_type)
+        if type_score == 0:
+            continue  # Skip unsuitable data types
+        
+        # For character types, skip if too long
+        if type_score == 1 and col_length > 20:
+            continue
+            
+        # Calculate cardinality ratio (unique values / total rows)
+        if row_count > 0:
+            cardinality_ratio = unique_count / row_count
+        else:
+            cardinality_ratio = 0
+            
+        # Skip columns with very high cardinality (likely unique keys)
+        if cardinality_ratio > 0.9:
+            continue
+            
+        # Skip columns with very low cardinality unless it's a date type
+        if unique_count < 10 and type_score != 2:
+            continue
+            
+        # Calculate null percentage
+        null_percentage = null_count / row_count if row_count > 0 else 1
+        
+        # Skip columns with high null percentage
+        if null_percentage > 0.2:
+            continue
+            
+        # Calculate overall score (higher is better)
+        # Ideal column has good cardinality but not too high, low nulls, and good data type
+        score = (
+            type_score * 10 +
+            (0.5 - abs(0.5 - cardinality_ratio)) * 5 +  # Prefer cardinality around 50%
+            (1 - null_percentage) * 2
+        )
+        
+        if score > best_score:
+            best_score = score
+            best_column = column_name
+    
+    # Calculate optimal number of partitions based on row count and column characteristics
+    if best_column and row_count > 0:
+        unique_count = stats_dict[best_column][0]
+        
+        # Base partition count on table size
+        if row_count < 10000:
+            partition_count = 2
+        elif row_count < 100000:
+            partition_count = 4
+        elif row_count < 1000000:
+            partition_count = 8
+        elif row_count < 10000000:
+            partition_count = 16
+        else:
+            partition_count = 32
+        
+        # Adjust partition count based on unique values
+        # Don't use more partitions than half the unique values (up to 32)
+        if unique_count is not None:
+            partition_count = min(partition_count, max(2, min(unique_count // 2, 32)))
+    else:
+        # Default partition count if no suitable column found
+        if row_count < 100000:
+            partition_count = 4
+        elif row_count < 1000000:
+            partition_count = 8
+        else:
+            partition_count = 16
+    
+    return best_column, partition_count
+
+def suggest_spark_jdbc_code(host, database, table, partition_column, partition_count):
+    """Generate sample Spark JDBC code with the recommended partitioning"""
+    code = f"""
+from pyspark.sql import SparkSession
+
+# Create Spark session
+spark = SparkSession.builder \\
+    .appName("TeradataJDBCReader") \\
+    .config("spark.jars", "/path/to/terajdbc4.jar") \\
+    .getOrCreate()
+
+# JDBC connection properties
+jdbc_url = "jdbc:teradata://{host}/DATABASE={database}"
+connection_properties = {{
+    "user": "your_username",
+    "password": "your_password",
+    "driver": "com.teradata.jdbc.TeraDriver"
+}}
+
+# Read the data with optimal partitioning
+"""
+    
+    if partition_column:
+        code += f"""
+# Using column-based partitioning
+df = spark.read \\
+    .format("jdbc") \\
+    .option("url", jdbc_url) \\
+    .option("dbtable", "{database}.{table}") \\
+    .option("user", "your_username") \\
+    .option("password", "your_password") \\
+    .option("driver", "com.teradata.jdbc.TeraDriver") \\
+    .option("partitionColumn", "{partition_column}") \\
+    .option("numPartitions", {partition_count}) \\
+    .option("lowerBound", "min_value") \\  # Replace with actual min value
+    .option("upperBound", "max_value") \\  # Replace with actual max value
+    .load()
+"""
+    else:
+        code += f"""
+# Using row-based partitioning
+df = spark.read \\
+    .format("jdbc") \\
+    .option("url", jdbc_url) \\
+    .option("dbtable", "{database}.{table}") \\
+    .option("user", "your_username") \\
+    .option("password", "your_password") \\
+    .option("driver", "com.teradata.jdbc.TeraDriver") \\
+    .option("numPartitions", {partition_count}) \\
+    .load()
+"""
+    
+    return code
+
+def main():
+    parser = argparse.ArgumentParser(description="Determine optimal Spark JDBC partitioning for a Teradata table")
+    parser.add_argument("--host", required=True, help="Teradata host")
+    parser.add_argument("--username", required=True, help="Database username")
+    parser.add_argument("--password", required=True, help="Database password")
+    parser.add_argument("--database", required=True, help="Database name")
+    parser.add_argument("--table", required=True, help="Table name")
+    
+    args = parser.parse_args()
+    
+    spark = create_spark_session()
+    
+    try:
+        # Get the overall row count
+        row_count = get_table_row_count(spark, args.host, args.database, args.table, 
+                                        args.username, args.password)
+        
+        if row_count == 0:
+            print("Table is empty or row count unavailable, using default partitioning scheme")
+            print("Recommended partition column: None")
+            print("Recommended number of partitions: 4")
+            spark_code = suggest_spark_jdbc_code(args.host, args.database, args.table, None, 4)
+            print("\nSample Spark code:")
+            print(spark_code)
+            return
+        
+        stats = get_column_stats(spark, args.host, args.database, args.table, 
+                                args.username, args.password)
+        columns = get_column_info(spark, args.host, args.database, args.table, 
+                                 args.username, args.password)
+        
+        partition_column, partition_count = calculate_optimal_partitioning(stats, columns, row_count)
+        
+        if partition_column:
+            print(f"Recommended partition column: {partition_column}")
+            print(f"Recommended number of partitions: {partition_count}")
+            
+            # Determine bounds for the partition column
+            jdbc_url = f"jdbc:teradata://{args.host}/DATABASE={args.database}"
+            properties = get_jdbc_connection_properties(args.username, args.password)
+            
+            # Generate sample Spark code
+            spark_code = suggest_spark_jdbc_code(args.host, args.database, args.table, 
+                                               partition_column, partition_count)
+            print("\nSample Spark code:")
+            print(spark_code)
+        else:
+            print("No suitable partition column found. Using row-based partitioning instead.")
+            print(f"Recommended number of partitions: {partition_count}")
+            
+            # Generate sample Spark code
+            spark_code = suggest_spark_jdbc_code(args.host, args.database, args.table, 
+                                               None, partition_count)
+            print("\nSample Spark code:")
+            print(spark_code)
+    finally:
+        spark.stop()
+
+if __name__ == "__main__":
+    main()
