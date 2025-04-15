@@ -1,0 +1,37 @@
+COLLECT STATS COLUMN (PrimaryIndexColumn) ON YourDatabase.YourTable;
+
+-- After stats are collected:
+SELECT
+    columnname,
+    modefreq,
+    numvalues,
+    ROUND(modefreq * 100.0 / NULLIFZERO(numvalues), 2) AS skew_percent
+FROM dbc.statsv
+WHERE databasename = 'YourDatabase'
+  AND tablename = 'YourTable'
+  AND columnname = 'PrimaryIndexColumn';
+
+
+
+SELECT 
+    c.databasename,
+    c.tablename,
+    c.columnname,
+    c.partitioningcolumn AS is_partition_column,
+    i.indexnumber,
+    i.indexname,
+    i.uniqueflag AS is_unique_index,
+    i.indextype,
+    i.columnposition,
+    i.columnname AS index_column
+FROM dbc.columnsV c
+LEFT JOIN dbc.indicesV i
+    ON c.databasename = i.databasename
+    AND c.tablename = i.tablename
+    AND c.columnname = i.columnname
+WHERE c.databasename = 'YourDatabase'
+  AND c.tablename = 'YourTable'
+ORDER BY 
+    is_partition_column DESC, 
+    i.indexnumber, 
+    i.columnposition;
