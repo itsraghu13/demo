@@ -40,7 +40,10 @@ def apply_salt_and_repartition(
     skew_ratio = max_count / median_count if median_count > 0 else 1
 
     # Define salt factor dynamically based on skew ratio
-    salt_factor = min(math.ceil(skew_ratio), 100)  # Cap at 100 to avoid over-salting
+    # salt_factor = min(math.ceil(skew_ratio), 100)  # Cap at 100 to avoid over-salting
+        # Define salt factor dynamically based on skew ratio
+    salt_factor = min(int(math.ceil(skew_ratio)), 100)  # Cap at 100 to avoid over-salting
+
 
     print(f"[INFO] Skew ratio: {skew_ratio:.2f}, using salt factor: {salt_factor}")
 
