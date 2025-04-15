@@ -1,18 +1,3 @@
-COLLECT STATS COLUMN (PrimaryIndexColumn) ON YourDatabase.YourTable;
-
--- After stats are collected:
-SELECT
-    columnname,
-    modefreq,
-    numvalues,
-    ROUND(modefreq * 100.0 / NULLIFZERO(numvalues), 2) AS skew_percent
-FROM dbc.statsv
-WHERE databasename = 'YourDatabase'
-  AND tablename = 'YourTable'
-  AND columnname = 'PrimaryIndexColumn';
-
-
-
 SELECT 
     c.databasename,
     c.tablename,
