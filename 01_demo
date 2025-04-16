@@ -1,0 +1,70 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lit
+import math
+from datetime import datetime, timedelta
+
+# Setup
+spark = SparkSession.builder.appName("Teradata Predicate Generator").getOrCreate()
+
+jdbc_url = "jdbc:teradata://<your-host>/DATABASE=<db>"
+jdbc_props = {
+    "user": "<user>",
+    "password": "<password>",
+    "driver": "com.teradata.jdbc.TeraDriver"
+}
+
+database_name = "your_db"
+table_name = "your_table"
+partition_count = 10  # or set dynamically
+
+# Step 1: Fetch composite primary key columns from dbc.IndicesV
+pk_df = spark.read.jdbc(jdbc_url, "dbc.IndicesV", properties=jdbc_props) \
+    .filter((col("DatabaseName") == database_name) &
+            (col("TableName") == table_name) &
+            (col("IndexType") == "K")) \
+    .select("ColumnName", "ColumnPosition") \
+    .orderBy("ColumnPosition")
+
+pk_cols = [row["ColumnName"] for row in pk_df.collect()]
+
+# Step 2: Get min/max for each PK column
+stats = {}
+for pk in pk_cols:
+    bounds_query = f"(SELECT MIN({pk}) AS min_val, MAX({pk}) AS max_val FROM {database_name}.{table_name}) AS bounds"
+    bounds_df = spark.read.jdbc(jdbc_url, bounds_query, properties=jdbc_props)
+    row = bounds_df.first()
+    if row and row["min_val"] is not None and row["max_val"] is not None:
+        stats[pk] = (row["min_val"], row["max_val"])
+
+# Step 3: Build predicates using combinations of bounds
+# For simplicity, partition only on the first PK column (but keep other PKs in WHERE clause)
+main_pk = pk_cols[0]
+main_min, main_max = stats[main_pk]
+step = math.ceil((main_max - main_min + 1) / partition_count)
+
+predicates = []
+for i in range(partition_count):
+    lower = main_min + i * step
+    upper = min(main_min + (i + 1) * step - 1, main_max)
+
+    parts = [f"{main_pk} BETWEEN {lower} AND {upper}"]
+    
+    # Optional: static filtering on other PKs if needed
+    for pk in pk_cols[1:]:
+        if pk in stats:
+            pk_min, pk_max = stats[pk]
+            parts.append(f"{pk} BETWEEN {pk_min} AND {pk_max}")
+
+    predicates.append(" AND ".join(parts))
+
+# Show predicates
+for p in predicates:
+    print(p)
+
+# Use like this:
+# df = spark.read.format("jdbc") \
+#     .option("url", jdbc_url) \
+#     .option("dbtable", table_name) \
+#     .option("predicates", predicates) \
+#     .options(**jdbc_props) \
+#     .load()
