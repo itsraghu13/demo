@@ -1,0 +1,266 @@
+from abc import ABC, abstractmethod
+from typing import Dict, Any, Optional
+from pyspark.sql import SparkSession, DataFrame
+from delta.tables import DeltaTable
+import os
+
+class ConfigReader:
+    """Reads configuration from a table"""
+    
+    def __init__(self, spark: SparkSession, config_table_path: str):
+        self.spark = spark
+        self.config_table_path = config_table_path
+        
+    def get_config(self, config_id: str) -> Dict[str, Any]:
+        """Reads configuration for a specific config_id"""
+        config_df = self.spark.read.table(self.config_table_path)
+        config_row = config_df.filter(f"config_id = '{config_id}'").first()
+        
+        if not config_row:
+            raise ValueError(f"Configuration with ID {config_id} not found")
+        
+        return {
+            "config_id": config_row["config_id"],
+            "begin_time": config_row["begin_time"],
+            "table_name": config_row["table_name"],
+            "db_name": config_row["db_name"],
+            "load_type": config_row["load_type"],
+            "source_name": config_row["source_name"],
+            "execution_timeout": config_row["executionTimeout"],
+            "custom_query": config_row["customQuery"],
+            "custom_refresh": config_row["customRefresh"]
+        }
+
+
+class Extractor(ABC):
+    """Base abstract class for data extraction"""
+    
+    def __init__(self, spark: SparkSession, config: Dict[str, Any]):
+        self.spark = spark
+        self.config = config
+        self.jdbc_options = self._get_jdbc_options()
+        
+    def _get_jdbc_options(self) -> Dict[str, str]:
+        """Get JDBC connection options for Teradata"""
+        return {
+            "driver": "com.teradata.jdbc.TeraDriver",
+            "url": f"jdbc:teradata://{os.environ.get('TERADATA_HOST')}/",
+            "user": os.environ.get("TERADATA_USER"),
+            "password": os.environ.get("TERADATA_PASSWORD"),
+            "fetchsize": "10000"
+        }
+    
+    @abstractmethod
+    def extract(self) -> DataFrame:
+        """Extract data based on configuration"""
+        pass
+
+
+class CustomQueryExtractor(Extractor):
+    """Extractor using custom SQL query"""
+    
+    def extract(self) -> DataFrame:
+        custom_query = self.config["custom_query"]
+        
+        if not custom_query:
+            raise ValueError("Custom query is required but not provided")
+        
+        return self.spark.read.format("jdbc") \
+            .options(**self.jdbc_options) \
+            .option("query", custom_query) \
+            .load()
+
+
+class FullExtractor(Extractor):
+    """Extractor for full table loads"""
+    
+    def extract(self) -> DataFrame:
+        table_name = self.config["table_name"]
+        db_name = self.config["db_name"]
+        full_table_name = f"{db_name}.{table_name}"
+        
+        return self.spark.read.format("jdbc") \
+            .options(**self.jdbc_options) \
+            .option("dbtable", full_table_name) \
+            .load()
+
+
+class CDCExtractor(Extractor):
+    """Extractor for CDC loads"""
+    
+    def extract(self) -> DataFrame:
+        table_name = self.config["table_name"]
+        db_name = self.config["db_name"]
+        cdc_table_name = f"{db_name}.cdc_{table_name}"
+        begin_time = self.config["begin_time"]
+        
+        if not begin_time:
+            raise ValueError("Begin time is required for CDC load but not provided")
+        
+        cdc_query = f"""
+            SELECT * FROM {cdc_table_name}
+            WHERE operation_timestamp >= '{begin_time}'
+        """
+        
+        return self.spark.read.format("jdbc") \
+            .options(**self.jdbc_options) \
+            .option("query", cdc_query) \
+            .load()
+
+
+class LoadStrategy(ABC):
+    """Base abstract class for loading strategies"""
+    
+    def __init__(self, spark: SparkSession, config: Dict[str, Any]):
+        self.spark = spark
+        self.config = config
+        
+    @abstractmethod
+    def load(self, data: DataFrame) -> None:
+        """Load data into Delta Lake"""
+        pass
+
+
+class FullLoadStrategy(LoadStrategy):
+    """Strategy for performing a full load (overwrite)"""
+    
+    def load(self, data: DataFrame) -> None:
+        table_name = self.config["table_name"]
+        source_name = self.config["source_name"]
+        target_table = f"bronze.{source_name}_{table_name}"
+        
+        # Overwrite the target table with the new data
+        data.write.format("delta") \
+            .mode("overwrite") \
+            .saveAsTable(target_table)
+
+
+class CDCLoadStrategy(LoadStrategy):
+    """Strategy for performing incremental CDC-based loads"""
+    
+    def load(self, data: DataFrame) -> None:
+        if data.isEmpty():
+            print("No CDC data to load")
+            return
+            
+        table_name = self.config["table_name"]
+        source_name = self.config["source_name"]
+        target_table = f"bronze.{source_name}_{table_name}"
+        
+        # Check if target table exists
+        try:
+            delta_table = DeltaTable.forName(self.spark, target_table)
+            self._merge_cdc_data(delta_table, data)
+        except:
+            # Table doesn't exist - create it
+            data.write.format("delta") \
+                .mode("overwrite") \
+                .saveAsTable(target_table)
+    
+    def _merge_cdc_data(self, delta_table: DeltaTable, cdc_data: DataFrame) -> None:
+        """
+        Merge CDC data into existing Delta table:
+        - INSERT new records
+        - UPDATE changed records
+        - DELETE removed records
+        """
+        # Assuming CDC data has 'operation' column with values like 'I' (insert), 'U' (update), 'D' (delete)
+        # Simplified version - full merge logic would depend on actual CDC format
+        
+        condition = "target.primary_key = source.primary_key"  # Adjust with your primary key
+        
+        delta_table.alias("target").merge(
+            cdc_data.alias("source"),
+            condition
+        ).whenMatchedDelete(
+            "source.operation = 'D'"
+        ).whenMatchedUpdate(
+            condition="source.operation = 'U'",
+            set={
+                col: f"source.{col}" for col in cdc_data.columns 
+                if col != "operation" and col != "operation_timestamp"
+            }
+        ).whenNotMatchedInsert(
+            condition="source.operation = 'I'",
+            values={
+                col: f"source.{col}" for col in cdc_data.columns
+                if col != "operation" and col != "operation_timestamp"
+            }
+        ).execute()
+
+
+class ExtractorFactory:
+    """Factory for creating the appropriate Extractor"""
+    
+    @staticmethod
+    def create_extractor(spark: SparkSession, config: Dict[str, Any]) -> Extractor:
+        if config["custom_query"]:
+            return CustomQueryExtractor(spark, config)
+        elif config["load_type"].lower() == "cdc":
+            return CDCExtractor(spark, config)
+        else:  # Full load or any other case
+            return FullExtractor(spark, config)
+
+
+class LoadStrategyFactory:
+    """Factory for creating the appropriate LoadStrategy"""
+    
+    @staticmethod
+    def create_load_strategy(spark: SparkSession, config: Dict[str, Any]) -> LoadStrategy:
+        if config["custom_refresh"] == "Y" or config["load_type"].lower() == "full" or config["begin_time"] is None:
+            return FullLoadStrategy(spark, config)
+        elif config["load_type"].lower() == "cdc":
+            return CDCLoadStrategy(spark, config)
+        else:  # Default to full load for any other case
+            return FullLoadStrategy(spark, config)
+
+
+class DataIngestionPipeline:
+    """Main class orchestrating the data ingestion pipeline"""
+    
+    def __init__(self, spark: SparkSession, config_table_path: str):
+        self.spark = spark
+        self.config_reader = ConfigReader(spark, config_table_path)
+    
+    def run(self, config_id: str) -> None:
+        """Run the data ingestion pipeline for a specific config_id"""
+        try:
+            # Get configuration
+            config = self.config_reader.get_config(config_id)
+            
+            # Check execution timeout
+            execution_timeout = config.get("execution_timeout")
+            if execution_timeout:
+                self.spark.conf.set("spark.sql.broadcastTimeout", execution_timeout)
+            
+            # Create extractor and load strategy
+            extractor = ExtractorFactory.create_extractor(self.spark, config)
+            load_strategy = LoadStrategyFactory.create_load_strategy(self.spark, config)
+            
+            # Extract data
+            data = extractor.extract()
+            
+            # Load data
+            load_strategy.load(data)
+            
+            print(f"Data ingestion completed successfully for config_id: {config_id}")
+            
+        except Exception as e:
+            print(f"Error in data ingestion pipeline: {str(e)}")
+            raise
+
+
+def create_spark_session() -> SparkSession:
+    """Create a SparkSession with Delta Lake support"""
+    return SparkSession.builder \
+        .appName("Teradata to Delta Lake Ingestion") \
+        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
+        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
+        .getOrCreate()
+
+
+# Example usage
+if __name__ == "__main__":
+    spark = create_spark_session()
+    pipeline = DataIngestionPipeline(spark, "metadata.config_table")
+    pipeline.run("config-001")  # Run for a specific config_id
