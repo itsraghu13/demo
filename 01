@@ -32,3 +32,42 @@ WHERE
     AND i.IndexType = 'K'  -- Primary Key
 ORDER BY 
     SkewRatio DESC;
+
+
+
+
+
+
+
+
+
+SELECT 
+    i.ColumnName,
+    c.ColumnType,
+    s.RowCount,
+    s.HighModeFreq,
+    s.UniqueValueCount,
+    CASE 
+        WHEN s.RowCount IS NOT NULL AND s.HighModeFreq IS NOT NULL AND s.RowCount > 0
+        THEN ROUND(1 - (CAST(s.HighModeFreq AS FLOAT) / s.RowCount), 4)
+        ELSE NULL
+    END AS SkewRatio
+FROM 
+    dbc.IndicesV i
+LEFT JOIN 
+    dbc.ColumnsV c
+    ON i.DatabaseName = c.DatabaseName
+    AND i.TableName = c.TableName
+    AND i.ColumnName = c.ColumnName
+LEFT JOIN 
+    dbc.StatsV s
+    ON i.DatabaseName = s.DatabaseName
+    AND i.TableName = s.TableName
+    AND i.ColumnName = s.ColumnName
+WHERE 
+    i.DatabaseName = 'your_db'
+    AND i.TableName = 'your_table'
+    AND i.IndexType = 'K'
+ORDER BY 
+    SkewRatio DESC;
+
