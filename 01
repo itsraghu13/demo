@@ -1,0 +1,29 @@
+SELECT 
+    c.ColumnName,
+    c.ColumnType,
+    c.Nullable,
+    s.MaxValue,
+    s.MinValue,
+    s.Mode,
+    s.ModeFrequency,
+    s.NumRows,
+    s.NumNulls,
+    (1.0 * s.UniqueValues / NULLIFZERO(s.NumRows)) AS SkewRatio
+FROM 
+    dbc.columnsV c
+JOIN 
+    dbc.IndicesV i 
+    ON c.DatabaseName = i.DatabaseName 
+    AND c.TableName = i.TableName 
+    AND c.ColumnName = i.ColumnName
+LEFT JOIN 
+    dbc.statsV s 
+    ON c.DatabaseName = s.DatabaseName 
+    AND c.TableName = s.TableName 
+    AND c.ColumnName = s.ColumnName
+WHERE 
+    i.DatabaseName = 'your_db'
+    AND i.TableName = 'your_table'
+    AND i.IndexType = 'K'
+ORDER BY 
+    SkewRatio DESC;
