@@ -44,6 +44,7 @@ predicates = []
 ranges = {}
 
 # Generate ranges for each PK column
+# Adjusted logic for handling upper bounds properly
 for pk in pk_cols:
     pk_min, pk_max = stats[pk]
     step = math.ceil((pk_max - pk_min + 1) / partition_count)
@@ -51,10 +52,12 @@ for pk in pk_cols:
     pk_ranges = []
     for i in range(partition_count):
         lower = pk_min + i * step
+        # Ensure the upper bound does not exceed the max value of pk_max
         upper = min(pk_min + (i + 1) * step - 1, pk_max)
         pk_ranges.append((lower, upper))
 
     ranges[pk] = pk_ranges
+
 
 # Now we need to combine predicates for each partition.
 for i in range(partition_count):
