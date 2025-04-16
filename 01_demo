@@ -1,3 +1,17 @@
+df = spark.read.jdbc(
+    url=jdbc_url,
+    table=table_name,
+    predicates=predicates,
+    properties={
+        "user": "<your_user>",
+        "password": "<your_password>",
+        "driver": "com.teradata.jdbc.TeraDriver"
+    }
+)
+
+
+
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col, lit
 import math
