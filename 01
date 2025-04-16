@@ -1,29 +1,34 @@
 SELECT 
-    c.ColumnName,
+    i.ColumnName,
     c.ColumnType,
     c.Nullable,
-    s.MaxValue,
-    s.MinValue,
-    s.Mode,
-    s.ModeFrequency,
-    s.NumRows,
-    s.NumNulls,
-    (1.0 * s.UniqueValues / NULLIFZERO(s.NumRows)) AS SkewRatio
+    s.RowCount,
+    s.UniqueValueCount,
+    s.NullCount,
+    s.HighModeFreq,
+    CASE 
+        WHEN s.RowCount > 0 THEN CAST(s.UniqueValueCount AS FLOAT) / s.RowCount
+        ELSE NULL
+    END AS SkewRatio,
+    CASE 
+        WHEN s.RowCount > 0 THEN CAST(s.NullCount AS FLOAT) / s.RowCount
+        ELSE NULL
+    END AS NullRatio
 FROM 
-    dbc.columnsV c
-JOIN 
-    dbc.IndicesV i 
-    ON c.DatabaseName = i.DatabaseName 
-    AND c.TableName = i.TableName 
-    AND c.ColumnName = i.ColumnName
+    dbc.IndicesV i
 LEFT JOIN 
-    dbc.statsV s 
-    ON c.DatabaseName = s.DatabaseName 
-    AND c.TableName = s.TableName 
-    AND c.ColumnName = s.ColumnName
+    dbc.ColumnsV c
+    ON i.DatabaseName = c.DatabaseName
+    AND i.TableName = c.TableName
+    AND i.ColumnName = c.ColumnName
+LEFT JOIN 
+    dbc.StatsV s
+    ON i.DatabaseName = s.DatabaseName
+    AND i.TableName = s.TableName
+    AND i.ColumnName = s.ColumnName
 WHERE 
-    i.DatabaseName = 'your_db'
-    AND i.TableName = 'your_table'
-    AND i.IndexType = 'K'
+    i.DatabaseName = 'your_db_name'
+    AND i.TableName = 'your_table_name'
+    AND i.IndexType = 'K'  -- Primary Key
 ORDER BY 
     SkewRatio DESC;
