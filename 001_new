@@ -1,3 +1,53 @@
+def getPartitionColumn(tableName: str):
+    spark = getSparkSession()
+    spark.sparkContext.setLogLevel('ERROR')
+    
+    # Get integer/long columns
+    get_columns = exec_query(f"SELECT * FROM {tableName} LIMIT 1")
+    filtered_columns = [f.name for f in get_columns.schema.fields if isinstance(f.dataType, (IntegerType, LongType))]
+    
+    if not filtered_columns:
+        log.warning("No integer/long columns found for partitioning")
+        return None
+    
+    # Query Teradata system tables for column statistics
+    stats_query = f"""
+    SELECT ColumnName, UniqueValueCount 
+    FROM DBC.StatsV 
+    WHERE DatabaseName = '{database_name}' 
+    AND TableName = '{tableName}'
+    AND ColumnName IN ({', '.join([f"'{col}'" for col in filtered_columns])})
+    """
+    
+    stats_df = exec_query(stats_query)
+    
+    if stats_df.count() > 0:
+        # Convert to dictionary
+        stats_dict = {row["ColumnName"]: row["UniqueValueCount"] for row in stats_df.collect()}
+        partition_col = max(stats_dict, key=stats_dict.get)
+        log.info(f"Partition column from statistics: {partition_col}")
+        return partition_col
+    
+    # Fallback to alternate method if statistics not available
+    # ...
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def exec_query(query):
     spark = getSparkSession()
     df = spark.read \
