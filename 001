@@ -1,0 +1,100 @@
+# these are some functions we are going to use in main code
+def exec_query(query):
+    spark = getSparkSession()
+    df = spark.read \
+        .format("jdbc") \
+        .option("url", jdbc_url) \
+        .option("dbtable", f"({query}) as subq") \
+        .option("user", properties['user']) \
+        .option("password", properties['password']) \
+        .option("driver", "com.ibm.db2.jcc.DB2Driver") \
+        .option("inferSchema", True) \
+        .load()
+    return df
+
+def exec_query1(query, partitionName, minValue, maxValue):
+    programArgument = readProgramArguments()
+    spark = getSparkSession()
+    df = spark.read \
+        .format("jdbc") \
+        .option("url", jdbc_url) \
+        .option("dbtable", f"({query}) as subq") \
+        .option("user", properties['user']) \
+        .option("password", properties['password']) \
+        .option("driver", "com.ibm.db2.jcc.DB2Driver") \
+        .option("inferSchema", True) \
+        .option("partitionColumn", partitionName) \
+        .option("lowerBound", minValue) \
+        .option("upperBound", maxValue) \
+        .option("numPartitions", f"{programArgument['NUM_PARTITIONS']}") \
+        .load()
+    return df
+
+def getPartitionColumn(tableName: str):
+    spark = getSparkSession()
+    spark.sparkContext.setLogLevel('ERROR')
+
+    # Get table schema and filter integer/long columns
+    get_columns = exec_query(f"SELECT * FROM {tableName} LIMIT 1")
+    filtered_columns = [f.name for f in get_columns.schema.fields if isinstance(f.dataType, (IntegerType, LongType))]
+
+    if not filtered_columns:
+        log.warning("No integer/long columns found for partitioning")
+        return None
+
+    # Construct and execute query efficiently
+    query = f"SELECT {', '.join(f'COUNT(DISTINCT {col}) AS {col}' for col in filtered_columns)} FROM {tableName}"
+    log.info(f"Executing query: {query}")
+
+    df = exec_query(query)
+    row = df.collect()[0]  # Collect only one row
+
+    log.info(row.asDict())
+
+    # Determine the column with the highest distinct count
+    partition_col = max(row.asDict(), key=row.asDict().get)
+    log.info(f"Partition column is {partition_col}")
+
+    return partition_col
+
+
+
+
+tableName = "" #your table name 
+partitionColumnName = getPartitionColumn(tableName) 
+# if you dont know the unique column use this function to get Partition column
+
+getminMax = execute_query(
+                    f"select min({partitionColumnName}) as minvalue,max({partitionColumnName}) as maxvalue from {tableName}")
+
+
+minValue = int(getminMax.select("MINVALUE").first()[0]) 
+# min value of the partition column 
+maxValue = int(getminMax.select("MAXVALUE").first()[0]) 
+# max value of the partition column
+
+
+dataCount = # total number of records in the table
+
+ 
+recordsPerBatch = 5000000 
+#adjust this number according to your need
+#i want to process 5Million in each batch
+
+batch_size = (maxValue - minValue) // (dataCount // recordsPerBatch) 
+# this will give constant value 
+# we are going to use this number to process our recods
+
+while minValue <= maxValue:
+    end = minValue + batch_size
+    query = f"""SELECT * FROM {tableName}
+    WHERE {partitionColumnName} >= {minValue} AND {partitionColumnName} < {end}"""
+    
+    batch_df = exec_query1(query, partitionColumnName, minValue, end)
+    
+    # ..........
+    # transformPhase(batch_df) 
+    # or write to target whatever you want like batch_df.write 
+    # ..........
+
+    minValue = end
