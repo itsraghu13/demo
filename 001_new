@@ -11,26 +11,60 @@ def getPartitionColumn(tableName: str):
         return None
     
     # Query Teradata system tables for column statistics
+    # Using a different approach that doesn't rely on exact column name matching
     stats_query = f"""
     SELECT ColumnName, UniqueValueCount 
     FROM DBC.StatsV 
     WHERE DatabaseName = '{database_name}' 
     AND TableName = '{tableName}'
-    AND ColumnName IN ({', '.join([f"'{col}'" for col in filtered_columns])})
     """
     
     stats_df = exec_query(stats_query)
     
     if stats_df.count() > 0:
-        # Convert to dictionary
-        stats_dict = {row["ColumnName"]: row["UniqueValueCount"] for row in stats_df.collect()}
-        partition_col = max(stats_dict, key=stats_dict.get)
-        log.info(f"Partition column from statistics: {partition_col}")
-        return partition_col
+        # Process the results to handle comma-separated column names
+        stats_dict = {}
+        
+        for row in stats_df.collect():
+            col_name = row["ColumnName"]
+            unique_count = row["UniqueValueCount"]
+            
+            # Split column names if they contain commas
+            if ',' in col_name:
+                col_names = [name.strip() for name in col_name.split(',')]
+                for name in col_names:
+                    if name in filtered_columns:
+                        stats_dict[name] = unique_count
+            else:
+                if col_name in filtered_columns:
+                    stats_dict[col_name] = unique_count
+        
+        # If we found statistics for our columns
+        if stats_dict:
+            partition_col = max(stats_dict, key=stats_dict.get)
+            log.info(f"Partition column from statistics: {partition_col}")
+            return partition_col
     
-    # Fallback to alternate method if statistics not available
-    # ...
-
+    # Fallback to an alternative method if statistics not found
+    log.warning("No statistics found, falling back to sampling method")
+    
+    # Use sampling as a fallback
+    sample_size = 100000  # Adjust based on your data size
+    sample_query = f"SELECT {', '.join(filtered_columns)} FROM {tableName} SAMPLE {sample_size}"
+    
+    sample_df = exec_query(sample_query)
+    
+    # Count distinct values in the sample
+    counts = {}
+    for col in filtered_columns:
+        counts[col] = sample_df.select(col).distinct().count()
+    
+    log.info(f"Column cardinality estimates: {counts}")
+    
+    # Select column with highest cardinality
+    partition_col = max(counts, key=counts.get)
+    log.info(f"Partition column is {partition_col}")
+    return partition_col
 
 
 
