@@ -1,0 +1,93 @@
+def exec_query(query):
+    spark = getSparkSession()
+    df = spark.read \
+        .format("jdbc") \
+        .option("url", jdbc_url) \
+        .option("dbtable", f"({query}) as subq") \
+        .option("user", properties['user']) \
+        .option("password", properties['password']) \
+        .option("driver", "com.teradata.jdbc.TeraDriver") \
+        .option("inferSchema", True) \
+        .load()
+    return df
+
+def exec_query1(query, partitionName, minValue, maxValue):
+    programArgument = readProgramArguments()
+    spark = getSparkSession()
+    df = spark.read \
+        .format("jdbc") \
+        .option("url", jdbc_url) \
+        .option("dbtable", f"({query}) as subq") \
+        .option("user", properties['user']) \
+        .option("password", properties['password']) \
+        .option("driver", "com.teradata.jdbc.TeraDriver") \
+        .option("inferSchema", True) \
+        .option("partitionColumn", partitionName) \
+        .option("lowerBound", minValue) \
+        .option("upperBound", maxValue) \
+        .option("numPartitions", f"{programArgument['NUM_PARTITIONS']}") \
+        .load()
+    return df
+
+def getPartitionColumn(tableName: str):
+    spark = getSparkSession()
+    spark.sparkContext.setLogLevel('ERROR')
+    # Get table schema and filter integer/long columns
+    get_columns = exec_query(f"SELECT * FROM {tableName} LIMIT 1")
+    filtered_columns = [f.name for f in get_columns.schema.fields if isinstance(f.dataType, (IntegerType, LongType))]
+    if not filtered_columns:
+        log.warning("No integer/long columns found for partitioning")
+        return None
+    
+    # Teradata syntax for COUNT DISTINCT
+    query = f"SELECT {', '.join(f'COUNT(DISTINCT {col}) AS {col}' for col in filtered_columns)} FROM {tableName}"
+    log.info(f"Executing query: {query}")
+    df = exec_query(query)
+    row = df.collect()[0]  # Collect only one row
+    log.info(row.asDict())
+    
+    # Determine the column with the highest distinct count
+    partition_col = max(row.asDict(), key=row.asDict().get)
+    log.info(f"Partition column is {partition_col}")
+    return partition_col
+
+tableName = "" #your table name 
+partitionColumnName = getPartitionColumn(tableName) 
+
+# if you don't know the unique column use this function to get Partition column
+getminMax = exec_query(
+    f"select min({partitionColumnName}) as minvalue, max({partitionColumnName}) as maxvalue from {tableName}")
+minValue = int(getminMax.select("MINVALUE").first()[0]) 
+# min value of the partition column 
+maxValue = int(getminMax.select("MAXVALUE").first()[0]) 
+# max value of the partition column
+dataCount = exec_query(f"SELECT COUNT(*) as count FROM {tableName}").first()[0]
+# total number of records in the table
+ 
+recordsPerBatch = 5000000 
+# adjust this number according to your need
+# process 5 million records in each batch
+batch_size = max(1, (maxValue - minValue) // (dataCount // recordsPerBatch)) 
+# this will give constant value 
+# we are going to use this number to process our records
+
+# Setup Delta table path
+delta_table_path = "/path/to/delta/table"  # Change to your desired path
+
+while minValue <= maxValue:
+    end = minValue + batch_size
+    # Teradata syntax might need adjustment based on specific requirements
+    query = f"""SELECT * FROM {tableName}
+    WHERE {partitionColumnName} >= {minValue} AND {partitionColumnName} < {end}"""
+    
+    batch_df = exec_query1(query, partitionColumnName, minValue, end)
+    
+    # Write batch to Delta table
+    batch_df.write \
+        .format("delta") \
+        .mode("append") \
+        .option("mergeSchema", "true") \
+        .save(delta_table_path)
+    
+    log.info(f"Processed batch from {minValue} to {end}")
+    minValue = end
