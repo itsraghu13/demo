@@ -1,3 +1,34 @@
+I want to refactor this class into a reusable and extendable Python template/module that:
+
+Can be imported and used by any other notebook or process.
+
+Allows parameters to be passed explicitly via constructor or fetched from widgets if not provided.
+
+Supports default values and error handling if widgets are missing.
+
+Exposes a method like fetch_data(query) that runs JDBC or Spark logic to return a DataFrame.
+
+Allows other users/processes to extend it easily, for example by adding new parameters (like region, user_id) or by overriding get_query() logic.
+
+Works both inside ADF-triggered notebooks (where widgets are passed) and standalone notebooks (for testing/debugging).
+
+Please help me design a clean, class-based solution for this, where:
+
+The base class can be used directly or extended.
+
+Widget usage is optional and does not throw errors if missing.
+
+It is easy to plug in custom logic while keeping the reusable structure intact.
+
+
+
+
+
+
+
+
+
+
 You have a Databricks notebook with a DataLoader class that uses widgets (e.g., config_id, table_name) to drive behavior. You want to convert this into a reusable and extendable class/template that:
 
 Works seamlessly with or without widgets, i.e., widgets are optional.
