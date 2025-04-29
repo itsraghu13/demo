@@ -1,0 +1,23 @@
+You have a Databricks notebook with a DataLoader class that uses widgets (e.g., config_id, table_name) to drive behavior. You want to convert this into a reusable and extendable class/template that:
+
+Works seamlessly with or without widgets, i.e., widgets are optional.
+
+Can be imported into other notebooks or processes.
+
+Allows other users or processes to:
+
+Use the base data loading logic.
+
+Customize by passing extra parameters or
+
+Extend the class with additional logic (e.g., custom queries, filters).
+
+Can be used both interactively in notebooks (with widgets) or programmatically (with explicit arguments).
+
+You want this to act as a flexible utility template, so others can:
+
+Simply import it,
+
+Pass parameters or rely on widgets,
+
+Extend it if needed.
