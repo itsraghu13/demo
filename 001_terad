@@ -1,0 +1,129 @@
+# teradata_parallel_fetcher_databricks/
+#   |- main.py
+#   |- partitioner.py
+#   |- teradata_reader.py
+#   |- writer.py
+#   |- utils.py
+
+# ------------------------------
+# main.py (Databricks-compatible)
+# ------------------------------
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from partitioner import get_partition_ranges
+from teradata_reader import fetch_partition
+from writer import write_to_parquet
+from utils import setup_logger
+
+# Configuration for Databricks (update accordingly)
+CONFIG = {
+    "host": "your.teradata.host",
+    "database": "your_database",
+    "user": "your_username",
+    "password": "your_password",
+    "jdbc_path": "/dbfs/FileStore/jars/terajdbc4.jar",  # Upload via DBFS
+    "table_name": "your_table",
+    "total_rows": 1200000000,
+    "num_partitions": 100,
+    "output_dir": "/dbfs/tmp/teradata_export"
+}
+
+def main():
+    logger = setup_logger()
+
+    host = CONFIG['host']
+    database = CONFIG['database']
+    user = CONFIG['user']
+    password = CONFIG['password']
+    jdbc_path = CONFIG['jdbc_path']
+    table_name = CONFIG['table_name']
+    total_rows = CONFIG['total_rows']
+    num_partitions = CONFIG['num_partitions']
+    output_dir = CONFIG['output_dir']
+
+    dbutils.fs.mkdirs(output_dir)
+    
+    logger.info("Preparing partitions...")
+    partition_ranges = get_partition_ranges(total_rows, num_partitions)
+
+    logger.info("Starting parallel fetch...")
+    with ThreadPoolExecutor(max_workers=min(num_partitions, 32)) as executor:
+        futures = {
+            executor.submit(fetch_partition, start, end, partition_id, host, database, user, password, jdbc_path, table_name): partition_id
+            for partition_id, (start, end) in enumerate(partition_ranges)
+        }
+
+        for future in as_completed(futures):
+            partition_id = futures[future]
+            try:
+                df = future.result()
+                write_to_parquet(df, output_dir, partition_id, logger)
+            except Exception as e:
+                logger.error(f"Partition {partition_id} failed: {e}")
+
+main()
+
+# ------------------------------
+# partitioner.py
+# ------------------------------
+def get_partition_ranges(total_rows, num_partitions):
+    step = total_rows // num_partitions
+    ranges = []
+    for i in range(num_partitions):
+        start = 1 + i * step
+        end = (i + 1) * step if i != num_partitions - 1 else total_rows
+        ranges.append((start, end))
+    return ranges
+
+# ------------------------------
+# teradata_reader.py
+# ------------------------------
+import jaydebeapi
+import pandas as pd
+
+def fetch_partition(start, end, partition_id, host, database, user, password, jdbc_path, table_name):
+    conn = jaydebeapi.connect(
+        "com.teradata.jdbc.TeraDriver",
+        f"jdbc:teradata://{host}/DATABASE={database}",
+        [user, password],
+        jdbc_path
+    )
+
+    sql = f"""
+    SELECT * FROM (
+        SELECT ROW_NUMBER() OVER () AS row_num, *
+        FROM {table_name}
+    ) AS temp
+    WHERE row_num BETWEEN {start} AND {end}
+    """
+
+    df = pd.read_sql(sql, conn)
+    conn.close()
+    return df
+
+# ------------------------------
+# writer.py
+# ------------------------------
+import pyarrow as pa
+import pyarrow.parquet as pq
+import os
+
+def write_to_parquet(df, output_dir, partition_id, logger):
+    table = pa.Table.from_pandas(df)
+    output_path = os.path.join(output_dir, f"partition_{partition_id}.parquet")
+    pq.write_table(table, output_path)
+    logger.info(f"Wrote partition {partition_id} to {output_path}")
+
+# ------------------------------
+# utils.py
+# ------------------------------
+import logging
+
+def setup_logger():
+    logger = logging.getLogger("TeradataFetcher")
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
